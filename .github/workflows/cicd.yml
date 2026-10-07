@@ -56,11 +56,11 @@ jobs:
 
     - name: Build Docker Image
       run: |
-        docker build -t adijaiswal/boardgame:latest .
+        docker build -t ayu-haker/devproject:latest .
 
     - name: Trivy Image Scan
       run: |
-        trivy image --format table -o trivy-image-report.html adijaiswal/board:latest
+        trivy image --format table -o trivy-image-report.html ayu-haker/devproject:latest
 
     - name: Login to Docker Hub
       uses: docker/login-action@v3
@@ -70,7 +70,7 @@ jobs:
 
     - name: Push Docker Image
       run: |
-          docker push adijaiswal/boardgame:latest
+          docker push ayu-haker/devproject:latest
           
     - name: Kubectl Action
       uses: tale/kubectl-action@v1

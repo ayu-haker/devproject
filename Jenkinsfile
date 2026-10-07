@@ -1,6 +1,14 @@
 pipeline {
     agent any
 
+    options {
+        timestamps()
+        timeout(time: 40, unit: 'MINUTES')
+        buildDiscarder(logRotator(numToKeepStr: '10'))
+        disableConcurrentBuilds()
+        skipDefaultCheckout(true)
+    }
+
     tools {
         jdk 'jdk17'
         maven 'maven3'
@@ -8,6 +16,10 @@ pipeline {
 
     environment {
         SCANNER_HOME = tool 'sonar-scanner'
+        DOCKER_USER  = 'ayu-haker'
+        APP_NAME     = 'devproject'
+        K8S_SERVER   = 'https://172.31.40.204:6443'
+        K8S_NS       = 'webapps'
     }
 
     stages {
@@ -17,20 +29,25 @@ pipeline {
                 git(
                     branch: 'main',
                     credentialsId: 'git-cred',
-                    url: 'https://github.com/sunilkumar0633/devproject.git'
+                    url: 'https://github.com/ayu-haker/devproject.git'
                 )
             }
         }
 
         stage('Compile') {
             steps {
-                sh 'mvn compile'
+                sh 'mvn -B clean compile'
             }
         }
 
         stage('Test') {
             steps {
-                sh 'mvn test'
+                sh 'mvn -B test'
+            }
+            post {
+                always {
+                    junit testResults: '**/target/surefire-reports/*.xml', allowEmptyResults: true
+                }
             }
         }
 
@@ -42,6 +59,11 @@ pipeline {
                     -o trivy-fs-report.html \
                     .
                 '''
+            }
+            post {
+                always {
+                    archiveArtifacts artifacts: 'trivy-fs-report.html', allowEmptyArchive: true
+                }
             }
         }
 
@@ -61,17 +83,19 @@ pipeline {
         stage('Quality Gate') {
             steps {
                 script {
-                    waitForQualityGate(
-                        abortPipeline: true,
-                        credentialsId: 'sonar-token'
-                    )
+                    timeout(unit: 'MINUTES', time: 10) {
+                        waitForQualityGate(
+                            abortPipeline: true,
+                            credentialsId: 'sonar-token'
+                        )
+                    }
                 }
             }
         }
 
         stage('Build') {
             steps {
-                sh 'mvn package'
+                sh 'mvn -B package -DskipTests'
             }
         }
 
@@ -82,13 +106,9 @@ pipeline {
                         credentialsId: 'docker-cred'
                     ) {
                         sh """
-                            docker build -t ${JOB_NAME}:${BUILD_ID} .
-
-                            docker tag ${JOB_NAME}:${BUILD_ID} \
-                                jacksneel/${JOB_NAME}:${BUILD_ID}
-
-                            docker tag ${JOB_NAME}:${BUILD_ID} \
-                                jacksneel/${JOB_NAME}:latest
+                            docker build -t ${APP_NAME}:${BUILD_ID} .
+                            docker tag ${APP_NAME}:${BUILD_ID} ${DOCKER_USER}/${APP_NAME}:${BUILD_ID}
+                            docker tag ${APP_NAME}:${BUILD_ID} ${DOCKER_USER}/${APP_NAME}:latest
                         """
                     }
                 }
@@ -101,8 +121,13 @@ pipeline {
                     trivy image \
                     --format table \
                     -o trivy-image-report.html \
-                    jacksneel/${JOB_NAME}:${BUILD_ID}
+                    ${DOCKER_USER}/${APP_NAME}:${BUILD_ID}
                 """
+            }
+            post {
+                always {
+                    archiveArtifacts artifacts: 'trivy-image-report.html', allowEmptyArchive: true
+                }
             }
         }
 
@@ -113,8 +138,8 @@ pipeline {
                         credentialsId: 'docker-cred'
                     ) {
                         sh """
-                            docker push jacksneel/${JOB_NAME}:${BUILD_ID}
-                            docker push jacksneel/${JOB_NAME}:latest
+                            docker push ${DOCKER_USER}/${APP_NAME}:${BUILD_ID}
+                            docker push ${DOCKER_USER}/${APP_NAME}:latest
                         """
                     }
                 }
@@ -125,21 +150,28 @@ pipeline {
             steps {
                 withKubeConfig(
                     credentialsId: 'k8-cred',
-                    namespace: 'webapps',
-                    serverUrl: 'https://172.31.40.204:6443'
+                    namespace: env.K8S_NS,
+                    serverUrl: env.K8S_SERVER
                 ) {
-                    sh '''
+                    sh """
                         kubectl apply -f deployment-service.yaml
-                    '''
+                        kubectl rollout status deployment/boardgame-deployment -n ${K8S_NS} --timeout=180s
+                    """
                 }
             }
         }
     }
 
     post {
+        success {
+            echo "Pipeline succeeded -> ${DOCKER_USER}/${APP_NAME}:${BUILD_ID}"
+        }
+        failure {
+            echo "Pipeline failed for build #${BUILD_NUMBER}"
+        }
         always {
             emailext(
-                subject: "Jenkins Build #${BUILD_NUMBER} - ${JOB_NAME}",
+                subject: "Jenkins Build #${BUILD_NUMBER} - ${JOB_NAME} [${currentBuild.currentResult}]",
                 body: """
                     <p>Build Status: ${currentBuild.currentResult}</p>
                     <p>
@@ -151,6 +183,7 @@ pipeline {
                 replyTo: 'sunielmahla@gmail.com',
                 mimeType: 'text/html'
             )
+            cleanWs()
         }
     }
 }
