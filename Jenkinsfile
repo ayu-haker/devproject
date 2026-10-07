@@ -10,7 +10,8 @@ pipeline {
     environment {
         IMAGE_NAME = 'devproject'
         CONTAINER_NAME = 'devproject'
-        APP_PORT = '8080'
+        APP_PORT = '8081'
+        CONTAINER_PORT = '8080'
     }
 
     stages {
@@ -107,8 +108,6 @@ pipeline {
                       .
 
                     echo "===== Docker Build Successful ====="
-
-                    docker images | grep ${IMAGE_NAME}
                 '''
             }
         }
@@ -127,7 +126,7 @@ pipeline {
                     docker run -d \
                       --name ${CONTAINER_NAME} \
                       --restart unless-stopped \
-                      -p ${APP_PORT}:8080 \
+                      -p ${APP_PORT}:${CONTAINER_PORT} \
                       ${IMAGE_NAME}:${BUILD_NUMBER}
 
                     echo "===== Container Started ====="
@@ -152,6 +151,9 @@ pipeline {
 ========================================
 
 Application:
+http://65.2.56.162:8081
+
+Jenkins:
 http://65.2.56.162:8080
 
 SonarQube:
