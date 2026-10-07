@@ -13,10 +13,10 @@ pipeline {
         IMAGE_NAME = 'devproject'
         CONTAINER_NAME = 'devproject'
 
-        // Jenkins runs on 8080
-        // Application runs on 8081
         APP_PORT = '8081'
         CONTAINER_PORT = '8080'
+
+        SONAR_PLUGIN = 'org.sonarsource.scanner.maven:sonar-maven-plugin:5.4.0.6343'
     }
 
     stages {
@@ -35,6 +35,7 @@ pipeline {
 
                     echo "===== Maven ====="
                     export JAVA_HOME=${JAVA17_HOME}
+                    export PATH=${JAVA_HOME}/bin:/usr/bin:/bin
                     mvn -version
 
                     echo "===== Docker ====="
@@ -65,6 +66,7 @@ pipeline {
                     echo "========================================"
 
                     echo "JAVA_HOME=${JAVA_HOME}"
+
                     java -version
                     mvn -version
 
@@ -110,10 +112,12 @@ pipeline {
                         echo "SonarQube Server: ${SONAR_HOST_URL}"
 
                         java -version
+                        mvn -version
 
-                        mvn sonar:sonar \
+                        mvn ${SONAR_PLUGIN}:sonar \
                             -Dsonar.projectKey=devproject \
-                            -Dsonar.projectName=devproject
+                            -Dsonar.projectName=devproject \
+                            -Dsonar.host.url=${SONAR_HOST_URL}
 
                         echo "===== SonarQube Analysis Completed ====="
                     '''
@@ -192,8 +196,11 @@ pipeline {
                         echo "===== Application is UP ====="
                     else
                         echo "===== Application Health Check FAILED ====="
+
                         echo "===== Docker Logs ====="
+
                         docker logs ${CONTAINER_NAME} --tail 100
+
                         exit 1
                     fi
 
