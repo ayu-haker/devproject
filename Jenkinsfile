@@ -8,8 +8,13 @@ pipeline {
     }
 
     environment {
+        JAVA17_HOME = '/usr/lib/jvm/java-17-openjdk-amd64'
+
         IMAGE_NAME = 'devproject'
         CONTAINER_NAME = 'devproject'
+
+        // Jenkins = 8080
+        // Application = 8081
         APP_PORT = '8081'
         CONTAINER_PORT = '8080'
     }
@@ -21,13 +26,16 @@ pipeline {
                 sh '''
                     set -e
 
-                    echo "===== Java Version ====="
+                    export JAVA_HOME=${JAVA17_HOME}
+                    export PATH=${JAVA_HOME}/bin:${PATH}
+
+                    echo "===== Java ====="
                     java -version
 
-                    echo "===== Maven Version ====="
+                    echo "===== Maven ====="
                     mvn -version
 
-                    echo "===== Docker Version ====="
+                    echo "===== Docker ====="
                     docker --version
                 '''
             }
@@ -44,7 +52,11 @@ pipeline {
                 sh '''
                     set -e
 
+                    export JAVA_HOME=${JAVA17_HOME}
+                    export PATH=${JAVA_HOME}/bin:${PATH}
+
                     echo "===== Maven Build ====="
+
                     mvn clean package -DskipTests
 
                     echo "===== Build Successful ====="
@@ -57,7 +69,11 @@ pipeline {
                 sh '''
                     set -e
 
+                    export JAVA_HOME=${JAVA17_HOME}
+                    export PATH=${JAVA_HOME}/bin:${PATH}
+
                     echo "===== Running Tests ====="
+
                     mvn test
 
                     echo "===== Tests Passed ====="
@@ -71,7 +87,11 @@ pipeline {
                     sh '''
                         set -e
 
+                        export JAVA_HOME=${JAVA17_HOME}
+                        export PATH=${JAVA_HOME}/bin:${PATH}
+
                         echo "===== SonarQube Analysis ====="
+                        echo "SonarQube: ${SONAR_HOST_URL}"
 
                         mvn sonar:sonar \
                           -Dsonar.projectKey=devproject \
@@ -100,14 +120,16 @@ pipeline {
                 sh '''
                     set -e
 
-                    echo "===== Building Docker Image ====="
+                    echo "===== Docker Build ====="
 
                     docker build \
-                      -t ${IMAGE_NAME}:${BUILD_NUMBER} \
-                      -t ${IMAGE_NAME}:latest \
-                      .
+                        -t ${IMAGE_NAME}:${BUILD_NUMBER} \
+                        -t ${IMAGE_NAME}:latest \
+                        .
 
-                    echo "===== Docker Build Successful ====="
+                    echo "===== Docker Image Created ====="
+
+                    docker images ${IMAGE_NAME}
                 '''
             }
         }
@@ -117,33 +139,40 @@ pipeline {
                 sh '''
                     set -e
 
-                    echo "===== Stopping Existing Container ====="
+                    echo "===== Deploying Container ====="
 
                     docker rm -f ${CONTAINER_NAME} 2>/dev/null || true
 
-                    echo "===== Starting New Container ====="
-
                     docker run -d \
-                      --name ${CONTAINER_NAME} \
-                      --restart unless-stopped \
-                      -p ${APP_PORT}:${CONTAINER_PORT} \
-                      ${IMAGE_NAME}:${BUILD_NUMBER}
+                        --name ${CONTAINER_NAME} \
+                        --restart unless-stopped \
+                        -p ${APP_PORT}:${CONTAINER_PORT} \
+                        ${IMAGE_NAME}:${BUILD_NUMBER}
 
-                    echo "===== Container Started ====="
+                    echo "===== Waiting for Application ====="
 
                     sleep 10
 
                     echo "===== Container Status ====="
+
                     docker ps --filter "name=${CONTAINER_NAME}"
 
-                    echo "===== Application URL ====="
-                    echo "http://65.2.56.162:${APP_PORT}"
+                    echo "===== Application Health ====="
+
+                    curl -f http://localhost:${APP_PORT} || {
+                        echo "Application health check failed"
+                        docker logs ${CONTAINER_NAME} --tail 100
+                        exit 1
+                    }
+
+                    echo "===== Deployment Successful ====="
                 '''
             }
         }
     }
 
     post {
+
         success {
             echo '''
 ========================================
@@ -159,8 +188,9 @@ http://65.2.56.162:8080
 SonarQube:
 http://65.2.56.162:9000
 
-Docker Container:
-devproject
+Docker:
+devproject:${BUILD_NUMBER}
+
 ========================================
 '''
         }
@@ -168,15 +198,15 @@ devproject
         failure {
             echo '''
 ========================================
-       PIPELINE FAILED
+         PIPELINE FAILED
 ========================================
 '''
 
             sh '''
-                echo "===== Docker Status ====="
+                echo "===== Docker Containers ====="
                 docker ps -a --filter "name=${CONTAINER_NAME}" || true
 
-                echo "===== Docker Logs ====="
+                echo "===== Application Logs ====="
                 docker logs ${CONTAINER_NAME} --tail 100 2>/dev/null || true
             '''
         }
