@@ -3,78 +3,80 @@ pipeline {
 
     options {
         timestamps()
-        timeout(time: 40, unit: 'MINUTES')
+        timeout(time: 30, unit: 'MINUTES')
         buildDiscarder(logRotator(numToKeepStr: '10'))
-        disableConcurrentBuilds()
-        skipDefaultCheckout(true)
-    }
-
-    tools {
-        jdk 'jdk17'
-        maven 'maven3'
     }
 
     environment {
-        SCANNER_HOME = tool 'sonar-scanner'
-        DOCKER_USER  = 'ayu-haker'
-        APP_NAME     = 'devproject'
-        K8S_SERVER   = 'https://172.31.40.204:6443'
-        K8S_NS       = 'webapps'
+        IMAGE_NAME = 'devproject'
+        CONTAINER_NAME = 'devproject'
+        APP_PORT = '8080'
     }
 
     stages {
 
-        stage('Git Checkout') {
+        stage('Environment Check') {
             steps {
-                git(
-                    branch: 'main',
-                    credentialsId: 'git-cred',
-                    url: 'https://github.com/ayu-haker/devproject.git'
-                )
+                sh '''
+                    set -e
+
+                    echo "===== Java Version ====="
+                    java -version
+
+                    echo "===== Maven Version ====="
+                    mvn -version
+
+                    echo "===== Docker Version ====="
+                    docker --version
+                '''
             }
         }
 
-        stage('Compile') {
+        stage('Checkout') {
             steps {
-                sh 'mvn -B clean compile'
+                checkout scm
+            }
+        }
+
+        stage('Build') {
+            steps {
+                sh '''
+                    set -e
+
+                    echo "===== Maven Build ====="
+                    mvn clean package -DskipTests
+
+                    echo "===== Build Successful ====="
+                '''
             }
         }
 
         stage('Test') {
             steps {
-                sh 'mvn -B test'
-            }
-            post {
-                always {
-                    junit testResults: '**/target/surefire-reports/*.xml', allowEmptyResults: true
-                }
-            }
-        }
-
-        stage('File System Scan') {
-            steps {
                 sh '''
-                    trivy fs \
-                    --format table \
-                    -o trivy-fs-report.html \
-                    .
+                    set -e
+
+                    echo "===== Running Tests ====="
+                    mvn test
+
+                    echo "===== Tests Passed ====="
                 '''
-            }
-            post {
-                always {
-                    archiveArtifacts artifacts: 'trivy-fs-report.html', allowEmptyArchive: true
-                }
             }
         }
 
         stage('SonarQube Analysis') {
             steps {
-                withSonarQubeEnv('sonar') {
+                withSonarQubeEnv('sonar-server') {
                     sh '''
-                        $SCANNER_HOME/bin/sonar-scanner \
-                        -Dsonar.projectName=DevOpsProject \
-                        -Dsonar.projectKey=DevOpsProject \
-                        -Dsonar.java.binaries=.
+                        set -e
+
+                        echo "===== SonarQube Analysis ====="
+
+                        mvn sonar:sonar \
+                          -Dsonar.projectKey=devproject \
+                          -Dsonar.projectName=devproject
+
+                        echo "===== SonarQube Analysis Completed ====="
                     '''
                 }
             }
@@ -82,108 +84,103 @@ pipeline {
 
         stage('Quality Gate') {
             steps {
-                script {
-                    timeout(unit: 'MINUTES', time: 10) {
-                        waitForQualityGate(
-                            abortPipeline: true,
-                            credentialsId: 'sonar-token'
-                        )
-                    }
+                echo "===== Waiting for SonarQube Quality Gate ====="
+
+                timeout(time: 10, unit: 'MINUTES') {
+                    waitForQualityGate abortPipeline: true
                 }
+
+                echo "===== Quality Gate Passed ====="
             }
         }
 
-        stage('Build') {
+        stage('Docker Build') {
             steps {
-                sh 'mvn -B package -DskipTests'
+                sh '''
+                    set -e
+
+                    echo "===== Building Docker Image ====="
+
+                    docker build \
+                      -t ${IMAGE_NAME}:${BUILD_NUMBER} \
+                      -t ${IMAGE_NAME}:latest \
+                      .
+
+                    echo "===== Docker Build Successful ====="
+
+                    docker images | grep ${IMAGE_NAME}
+                '''
             }
         }
 
-        stage('Build & Tag Docker Image') {
+        stage('Docker Deploy') {
             steps {
-                script {
-                    withDockerRegistry(
-                        credentialsId: 'docker-cred'
-                    ) {
-                        sh """
-                            docker build -t ${APP_NAME}:${BUILD_ID} .
-                            docker tag ${APP_NAME}:${BUILD_ID} ${DOCKER_USER}/${APP_NAME}:${BUILD_ID}
-                            docker tag ${APP_NAME}:${BUILD_ID} ${DOCKER_USER}/${APP_NAME}:latest
-                        """
-                    }
-                }
-            }
-        }
+                sh '''
+                    set -e
 
-        stage('Docker Image Scan') {
-            steps {
-                sh """
-                    trivy image \
-                    --format table \
-                    -o trivy-image-report.html \
-                    ${DOCKER_USER}/${APP_NAME}:${BUILD_ID}
-                """
-            }
-            post {
-                always {
-                    archiveArtifacts artifacts: 'trivy-image-report.html', allowEmptyArchive: true
-                }
-            }
-        }
+                    echo "===== Stopping Existing Container ====="
 
-        stage('Push Docker Image') {
-            steps {
-                script {
-                    withDockerRegistry(
-                        credentialsId: 'docker-cred'
-                    ) {
-                        sh """
-                            docker push ${DOCKER_USER}/${APP_NAME}:${BUILD_ID}
-                            docker push ${DOCKER_USER}/${APP_NAME}:latest
-                        """
-                    }
-                }
-            }
-        }
+                    docker rm -f ${CONTAINER_NAME} 2>/dev/null || true
 
-        stage('Deploy To Kubernetes') {
-            steps {
-                withKubeConfig(
-                    credentialsId: 'k8-cred',
-                    namespace: env.K8S_NS,
-                    serverUrl: env.K8S_SERVER
-                ) {
-                    sh """
-                        kubectl apply -f deployment-service.yaml
-                        kubectl rollout status deployment/boardgame-deployment -n ${K8S_NS} --timeout=180s
-                    """
-                }
+                    echo "===== Starting New Container ====="
+
+                    docker run -d \
+                      --name ${CONTAINER_NAME} \
+                      --restart unless-stopped \
+                      -p ${APP_PORT}:8080 \
+                      ${IMAGE_NAME}:${BUILD_NUMBER}
+
+                    echo "===== Container Started ====="
+
+                    sleep 10
+
+                    echo "===== Container Status ====="
+                    docker ps --filter "name=${CONTAINER_NAME}"
+
+                    echo "===== Application URL ====="
+                    echo "http://65.2.56.162:${APP_PORT}"
+                '''
             }
         }
     }
 
     post {
         success {
-            echo "Pipeline succeeded -> ${DOCKER_USER}/${APP_NAME}:${BUILD_ID}"
+            echo '''
+========================================
+       PIPELINE SUCCESSFUL
+========================================
+
+Application:
+http://65.2.56.162:8080
+
+SonarQube:
+http://65.2.56.162:9000
+
+Docker Container:
+devproject
+========================================
+'''
         }
+
         failure {
-            echo "Pipeline failed for build #${BUILD_NUMBER}"
+            echo '''
+========================================
+       PIPELINE FAILED
+========================================
+'''
+
+            sh '''
+                echo "===== Docker Status ====="
+                docker ps -a --filter "name=${CONTAINER_NAME}" || true
+
+                echo "===== Docker Logs ====="
+                docker logs ${CONTAINER_NAME} --tail 100 2>/dev/null || true
+            '''
         }
+
         always {
-            emailext(
-                subject: "Jenkins Build #${BUILD_NUMBER} - ${JOB_NAME} [${currentBuild.currentResult}]",
-                body: """
-                    <p>Build Status: ${currentBuild.currentResult}</p>
-                    <p>
-                        Check the build details:
-                        <a href="${BUILD_URL}">${BUILD_URL}</a>
-                    </p>
-                """,
-                to: 'sunielmahla@gmail.com',
-                replyTo: 'sunielmahla@gmail.com',
-                mimeType: 'text/html'
-            )
-            cleanWs()
+            echo "Pipeline finished: ${currentBuild.currentResult}"
         }
     }
 }
